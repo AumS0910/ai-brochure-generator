@@ -1,0 +1,15 @@
+﻿@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-[#f7f5f1] text-[#0b0d12];
+}
+
+input, textarea {
+  @apply outline-none;
+}
