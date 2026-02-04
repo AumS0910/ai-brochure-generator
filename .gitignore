@@ -1,0 +1,23 @@
+﻿# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+.next/
+
+# Env
+.env
+
+# Outputs (VERY IMPORTANT)
+backend/output/
+backend/output/**
+output/
+output/**
+
+# Playwright
+ms-playwright/
+
+# OS
+Thumbs.db
