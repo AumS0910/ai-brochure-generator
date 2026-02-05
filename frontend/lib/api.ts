@@ -66,6 +66,13 @@ export async function apiGenerate(prompt: string) {
   });
 }
 
+export async function apiEdit(brochureId: number, instruction: string) {
+  return request(`/brochures/${brochureId}/edit`, {
+    method: "POST",
+    body: JSON.stringify({ instruction }),
+  });
+}
+
 export async function apiHistory() {
   return request("/brochures/my", { method: "GET" });
 }

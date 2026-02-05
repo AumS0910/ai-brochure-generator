@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { apiGenerate } from "../../../lib/api";
+import { apiEdit, apiGenerate } from "../../../lib/api";
 
 const pageMotion = {
   initial: { opacity: 0, y: 10 },
@@ -25,6 +25,10 @@ export default function GeneratePage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState("");
+  const [refineInput, setRefineInput] = useState("");
+  const [refineError, setRefineError] = useState("");
+  const [refineLoading, setRefineLoading] = useState(false);
+  const [previewStamp, setPreviewStamp] = useState<number>(Date.now());
   const [presets, setPresets] = useState<string[]>([]);
 
   useEffect(() => {
@@ -58,6 +62,7 @@ export default function GeneratePage() {
     try {
       const res = await apiGenerate(prompt.trim());
       setResult(res);
+      setPreviewStamp(Date.now());
     } catch (err: any) {
       const msg = err.message || "Generation failed";
       if (msg.toLowerCase().includes("session expired")) {
@@ -77,6 +82,7 @@ export default function GeneratePage() {
     try {
       const res = await apiGenerate(prompt.trim());
       setResult(res);
+      setPreviewStamp(Date.now());
     } catch (err: any) {
       const msg = err.message || "Generation failed";
       if (msg.toLowerCase().includes("session expired")) {
@@ -97,6 +103,41 @@ export default function GeneratePage() {
   }
 
   const allPrompts = [...defaultPrompts, ...presets];
+
+  async function handleRefine(e: React.FormEvent) {
+    e.preventDefault();
+    setRefineError("");
+    if (!result?.id) return;
+    if (!refineInput.trim()) {
+      setRefineError("Add a short instruction to refine.");
+      return;
+    }
+    setRefineLoading(true);
+    try {
+      const res = await apiEdit(result.id, refineInput.trim());
+      if (res?.error) {
+        setRefineError(res.message || "No valid edits detected.");
+        return;
+      }
+      setResult((prev: any) => ({
+        ...prev,
+        schema: res.schema,
+        png_url: res.png_url,
+        pdf_url: res.pdf_url,
+      }));
+      setPreviewStamp(Date.now());
+      setRefineInput("");
+    } catch (err: any) {
+      const msg = err.message || "Refine failed";
+      if (msg.toLowerCase().includes("session expired")) {
+        router.replace("/login");
+        return;
+      }
+      setRefineError(msg);
+    } finally {
+      setRefineLoading(false);
+    }
+  }
 
   return (
     <motion.main
@@ -226,7 +267,7 @@ export default function GeneratePage() {
               ) : result ? (
                 <img
                   className="h-full w-full object-cover"
-                  src={`http://localhost:8000${result.png_url}`}
+                  src={`http://localhost:8000${result.png_url}?t=${previewStamp}`}
                   alt="Brochure preview"
                 />
               ) : (
@@ -255,6 +296,32 @@ export default function GeneratePage() {
                   Download PDF
                 </a>
               </div>
+            )}
+
+            {result && (
+              <form onSubmit={handleRefine} className="mt-6 grid gap-3">
+                <div className="text-xs uppercase tracking-[0.35em] text-white/60">Refine with AI</div>
+                <input
+                  className="w-full rounded-2xl border border-white/15 bg-transparent px-4 py-3 text-sm text-white placeholder-white/35 outline-none transition focus:border-white/50 focus:shadow-[0_0_0_3px_rgba(255,255,255,0.12)]"
+                  placeholder="e.g. Make it more minimal, remove dining, emphasize spa."
+                  value={refineInput}
+                  onChange={(e) => setRefineInput(e.target.value)}
+                />
+                {refineError && (
+                  <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                    {refineError}
+                  </div>
+                )}
+                <motion.button
+                  className="w-full rounded-2xl border border-white/25 px-5 py-3 text-xs uppercase tracking-[0.3em] text-white/80 transition hover:border-white/50 disabled:cursor-not-allowed disabled:opacity-60"
+                  type="submit"
+                  disabled={refineLoading}
+                  whileHover={{ scale: refineLoading ? 1 : 1.02 }}
+                  whileTap={{ scale: refineLoading ? 1 : 0.98 }}
+                >
+                  {refineLoading ? "Refining..." : "Apply refinement"}
+                </motion.button>
+              </form>
             )}
           </motion.div>
         </section>

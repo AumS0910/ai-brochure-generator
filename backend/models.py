@@ -28,6 +28,7 @@ class Brochure(Base):
     headline = Column(String(255), nullable=False)
     description = Column(Text, nullable=False)
     amenities = Column(Text, nullable=False)
+    schema_json = Column(Text, nullable=False)
     png_path = Column(String(500), nullable=False)
     pdf_path = Column(String(500), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
