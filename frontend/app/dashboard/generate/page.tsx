@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { apiEdit, apiGenerate } from "../../../lib/api";
+import { apiEdit, apiGenerate, apiGenerateWithHero, apiUploadGallery, apiUpdateContact } from "../../../lib/api";
 
 const pageMotion = {
   initial: { opacity: 0, y: 10 },
@@ -30,6 +30,28 @@ export default function GeneratePage() {
   const [refineLoading, setRefineLoading] = useState(false);
   const [previewStamp, setPreviewStamp] = useState<number>(Date.now());
   const [presets, setPresets] = useState<string[]>([]);
+  const [heroFile, setHeroFile] = useState<File | null>(null);
+  const [galleryFiles, setGalleryFiles] = useState<File[]>([]);
+  const [galleryLoading, setGalleryLoading] = useState(false);
+  const [galleryError, setGalleryError] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [contactWebsite, setContactWebsite] = useState("");
+  const [contactAddress, setContactAddress] = useState("");
+  const [contactLoading, setContactLoading] = useState(false);
+  const [contactError, setContactError] = useState("");
+
+  const qrPreviewUrl = (() => {
+    const raw = result?.schema?.sections?.contact?.qr_code_url;
+    if (!raw) return "";
+    if (typeof raw === "string" && raw.startsWith("file:///")) {
+      const parts = raw.split("/output/");
+      if (parts.length > 1) {
+        return `http://localhost:8000/files/${parts[1]}`.replace("\\", "/");
+      }
+    }
+    return raw;
+  })();
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -60,7 +82,9 @@ export default function GeneratePage() {
     }
     setLoading(true);
     try {
-      const res = await apiGenerate(prompt.trim());
+      const res = heroFile
+        ? await apiGenerateWithHero(prompt.trim(), heroFile)
+        : await apiGenerate(prompt.trim());
       setResult(res);
       setPreviewStamp(Date.now());
     } catch (err: any) {
@@ -80,7 +104,9 @@ export default function GeneratePage() {
     setError("");
     setLoading(true);
     try {
-      const res = await apiGenerate(prompt.trim());
+      const res = heroFile
+        ? await apiGenerateWithHero(prompt.trim(), heroFile)
+        : await apiGenerate(prompt.trim());
       setResult(res);
       setPreviewStamp(Date.now());
     } catch (err: any) {
@@ -139,6 +165,68 @@ export default function GeneratePage() {
     }
   }
 
+  async function handleGalleryUpload(e: React.FormEvent) {
+    e.preventDefault();
+    setGalleryError("");
+    if (!result?.id) return;
+    if (galleryFiles.length === 0) {
+      setGalleryError("Select 1 to 5 images to upload.");
+      return;
+    }
+    setGalleryLoading(true);
+    try {
+      const res = await apiUploadGallery(result.id, galleryFiles);
+      setResult((prev: any) => ({
+        ...prev,
+        schema: res.schema,
+        png_url: res.png_url,
+        pdf_url: res.pdf_url,
+      }));
+      setPreviewStamp(Date.now());
+      setGalleryFiles([]);
+    } catch (err: any) {
+      const msg = err.message || "Gallery upload failed";
+      if (msg.toLowerCase().includes("session expired")) {
+        router.replace("/login");
+        return;
+      }
+      setGalleryError(msg);
+    } finally {
+      setGalleryLoading(false);
+    }
+  }
+
+  async function handleContactSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setContactError("");
+    if (!result?.id) return;
+    setContactLoading(true);
+    try {
+      const res = await apiUpdateContact(result.id, {
+        email: contactEmail || undefined,
+        phone: contactPhone || undefined,
+        website: contactWebsite || undefined,
+        address: contactAddress || undefined,
+      });
+      setResult((prev: any) => ({
+        ...prev,
+        schema: res.schema,
+        png_url: res.png_url,
+        pdf_url: res.pdf_url,
+      }));
+      setPreviewStamp(Date.now());
+    } catch (err: any) {
+      const msg = err.message || "Contact update failed";
+      if (msg.toLowerCase().includes("session expired")) {
+        router.replace("/login");
+        return;
+      }
+      setContactError(msg);
+    } finally {
+      setContactLoading(false);
+    }
+  }
+
   return (
     <motion.main
       className="min-h-screen bg-[#0b0d12] text-white"
@@ -171,7 +259,7 @@ export default function GeneratePage() {
           </motion.div>
         </header>
 
-        <section className="grid gap-8 lg:grid-cols-[1fr_1fr]">
+        <section className="grid gap-8 lg:grid-cols-[0.95fr_1.05fr]">
           <motion.div
             className="rounded-3xl border border-white/10 bg-white/5 p-8 backdrop-blur"
             whileHover={{ y: -3, boxShadow: "0 20px 50px rgba(0,0,0,0.35)" }}
@@ -190,6 +278,18 @@ export default function GeneratePage() {
                 onChange={(e) => setPrompt(e.target.value)}
                 required
               />
+
+              <div className="grid gap-2">
+                <label className="text-xs uppercase tracking-[0.25em] text-white/60">
+                  Hero image (optional)
+                </label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="w-full rounded-2xl border border-white/15 bg-transparent px-4 py-3 text-sm text-white/80 file:mr-3 file:rounded-full file:border-0 file:bg-white/15 file:px-4 file:py-2 file:text-xs file:uppercase file:tracking-[0.25em] file:text-white/70"
+                  onChange={(e) => setHeroFile(e.target.files?.[0] ?? null)}
+                />
+              </div>
 
               <div className="flex flex-wrap items-center gap-3">
                 {allPrompts.map((item) => (
@@ -296,6 +396,92 @@ export default function GeneratePage() {
                   Download PDF
                 </a>
               </div>
+            )}
+
+            {result && (
+              <form onSubmit={handleGalleryUpload} className="mt-6 grid gap-3">
+                <div className="text-[11px] uppercase tracking-[0.32em] text-white/55">
+                  Enhance with additional images (optional)
+                </div>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="w-full rounded-2xl border border-white/15 bg-transparent px-4 py-3 text-sm text-white/80 file:mr-3 file:rounded-full file:border-0 file:bg-white/15 file:px-4 file:py-2 file:text-xs file:uppercase file:tracking-[0.25em] file:text-white/70"
+                  onChange={(e) => setGalleryFiles(Array.from(e.target.files ?? []))}
+                />
+                {galleryError && (
+                  <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                    {galleryError}
+                  </div>
+                )}
+                <motion.button
+                  className="w-full rounded-2xl border border-white/25 px-5 py-3 text-xs uppercase tracking-[0.3em] text-white/80 transition hover:border-white/50 disabled:cursor-not-allowed disabled:opacity-60"
+                  type="submit"
+                  disabled={galleryLoading}
+                  whileHover={{ scale: galleryLoading ? 1 : 1.02 }}
+                  whileTap={{ scale: galleryLoading ? 1 : 0.98 }}
+                >
+                  {galleryLoading ? "Uploading..." : "Upload gallery"}
+                </motion.button>
+              </form>
+            )}
+
+            {result && (
+              <form onSubmit={handleContactSubmit} className="mt-6 grid gap-3">
+                <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.32em] text-white/55">
+                  <span>Public contact details shown on the brochure</span>
+                  <span className="h-px w-10 bg-white/15" />
+                </div>
+                <input
+                  className="w-full rounded-2xl border border-white/15 bg-transparent px-4 py-3 text-sm text-white placeholder-white/35 outline-none transition focus:border-white/50 focus:shadow-[0_0_0_3px_rgba(255,255,255,0.12)]"
+                  placeholder="Email"
+                  value={contactEmail}
+                  onChange={(e) => setContactEmail(e.target.value)}
+                />
+                <input
+                  className="w-full rounded-2xl border border-white/15 bg-transparent px-4 py-3 text-sm text-white placeholder-white/35 outline-none transition focus:border-white/50 focus:shadow-[0_0_0_3px_rgba(255,255,255,0.12)]"
+                  placeholder="Phone"
+                  value={contactPhone}
+                  onChange={(e) => setContactPhone(e.target.value)}
+                />
+                <input
+                  className="w-full rounded-2xl border border-white/15 bg-transparent px-4 py-3 text-sm text-white placeholder-white/35 outline-none transition focus:border-white/50 focus:shadow-[0_0_0_3px_rgba(255,255,255,0.12)]"
+                  placeholder="Website (QR will appear after save)"
+                  value={contactWebsite}
+                  onChange={(e) => setContactWebsite(e.target.value)}
+                />
+                <input
+                  className="w-full rounded-2xl border border-white/15 bg-transparent px-4 py-3 text-sm text-white placeholder-white/35 outline-none transition focus:border-white/50 focus:shadow-[0_0_0_3px_rgba(255,255,255,0.12)]"
+                  placeholder="Address"
+                  value={contactAddress}
+                  onChange={(e) => setContactAddress(e.target.value)}
+                />
+                {contactError && (
+                  <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                    {contactError}
+                  </div>
+                )}
+                <motion.button
+                  className="w-full rounded-2xl border border-white/25 px-5 py-3 text-xs uppercase tracking-[0.3em] text-white/80 transition hover:border-white/50 disabled:cursor-not-allowed disabled:opacity-60"
+                  type="submit"
+                  disabled={contactLoading}
+                  whileHover={{ scale: contactLoading ? 1 : 1.02 }}
+                  whileTap={{ scale: contactLoading ? 1 : 0.98 }}
+                >
+                  {contactLoading ? "Saving..." : "Save contact"}
+                </motion.button>
+                {qrPreviewUrl && (
+                  <div className="mt-2 rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <div className="text-xs uppercase tracking-[0.25em] text-white/60">QR preview</div>
+                    <img
+                      className="mt-3 h-28 w-28 rounded-lg bg-white p-2"
+                      src={qrPreviewUrl}
+                      alt="QR code preview"
+                    />
+                  </div>
+                )}
+              </form>
             )}
 
             {result && (

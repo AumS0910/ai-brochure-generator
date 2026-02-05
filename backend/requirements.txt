@@ -7,3 +7,5 @@ requests
 jinja2
 playwright
 python-dotenv
+qrcode[pil]
+pillow

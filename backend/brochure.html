@@ -138,6 +138,18 @@
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
+
+    .qr-code {
+      position: absolute;
+      right: 36px;
+      bottom: 36px;
+      width: 120px;
+      height: 120px;
+      padding: 8px;
+      background: rgba(255,255,255,0.9);
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+    }
   </style>
 </head>
 <body>
@@ -157,6 +169,10 @@
       <p class="desc">{{description}}</p>
       <p class="amenities">{{amenities}}</p>
     </div>
+
+    {% if qr_code_url %}
+    <img class="qr-code" src="{{qr_code_url}}" alt="QR code" />
+    {% endif %}
 
   </div>
 </body>

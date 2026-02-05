@@ -25,12 +25,12 @@ def _split_hotel_lines(name: str) -> tuple[str, str, str]:
     return words[0], words[1], " ".join(words[2:])
 
 
-def _embed_hero_data_url(hero_url: str) -> str:
-    if not hero_url or not hero_url.startswith("file://"):
-        return hero_url
-    file_path = Path(hero_url.replace("file:///", "")).resolve()
+def _embed_file_data_url(file_url: str) -> str:
+    if not file_url or not file_url.startswith("file://"):
+        return file_url
+    file_path = Path(file_url.replace("file:///", "")).resolve()
     if not file_path.exists():
-        return hero_url
+        return file_url
     suffix = file_path.suffix.lower()
     mime = "image/png"
     if suffix in {".jpg", ".jpeg"}:
@@ -47,7 +47,8 @@ def render_brochure_html(data: dict) -> str:
         amenities_text = str(amenities)
 
     line1, line2, line3 = _split_hotel_lines(data.get("hotel_name", ""))
-    hero_url = _embed_hero_data_url(data.get("hero_url", ""))
+    hero_url = _embed_file_data_url(data.get("hero_url", ""))
+    qr_code_url = _embed_file_data_url(data.get("qr_code_url", ""))
 
     html = Template(TEMPLATE).render(
         hero_url=hero_url,
@@ -58,6 +59,7 @@ def render_brochure_html(data: dict) -> str:
         headline=data.get("headline", ""),
         description=data.get("description", ""),
         amenities=amenities_text,
+        qr_code_url=qr_code_url,
     )
     return html
 

@@ -15,13 +15,14 @@ from typing import Optional, Any
 
 import requests
 import logging
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
+import qrcode
 
 from auth import hash_password, verify_password, create_access_token, get_current_user
 from ai_image import generate_hero_image
@@ -100,6 +101,13 @@ class BrochureResponse(BaseModel):
 
 class EditRequest(BaseModel):
     instruction: str
+
+
+class ContactRequest(BaseModel):
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    address: Optional[str] = None
 
 
 DEFAULT_AMENITIES = [
@@ -360,6 +368,7 @@ def schema_to_render_data(schema: dict) -> dict:
 
     hero = sections.get("hero", {})
     amenities = sections.get("amenities", {})
+    contact = sections.get("contact", {})
 
     hero_visible = hero.get("visibility", True)
     amenities_visible = amenities.get("visibility", True)
@@ -373,6 +382,7 @@ def schema_to_render_data(schema: dict) -> dict:
         "headline": hero.get("headline", "") if hero_visible else "",
         "description": hero.get("description", "") if hero_visible else "",
         "amenities": amenities.get("items", []) if amenities_visible else [],
+        "qr_code_url": contact.get("qr_code_url") or "",
     }
 
 
@@ -643,6 +653,26 @@ def _safe_path(path: str) -> Path:
     return target
 
 
+def _brochure_run_dir(brochure_id: int) -> Path:
+    run_dir = BASE_OUTPUT / str(brochure_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def _update_schema_files(run_dir: Path, schema: dict, render_data: dict) -> None:
+    (run_dir / "schema.json").write_text(json.dumps(schema, indent=2), encoding="utf-8")
+    (run_dir / "data.json").write_text(json.dumps(render_data, indent=2), encoding="utf-8")
+
+
+def _write_qr_code(url: str, out_path: Path) -> str:
+    qr = qrcode.QRCode(box_size=6, border=2)
+    qr.add_data(url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    img.save(out_path)
+    return out_path.resolve().as_uri()
+
+
 @app.post("/auth/signup", response_model=TokenResponse)
 def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     if len(payload.password) > 72:
@@ -671,31 +701,66 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 
 @app.post("/brochures/generate", response_model=BrochureResponse)
 async def generate_brochure(
-    payload: GenerateRequest,
+    request: Request,
+    prompt: Optional[str] = Form(None),
+    hero_url: Optional[str] = Form(None),
+    hero_path: Optional[str] = Form(None),
+    hero_file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    if not payload.prompt or len(payload.prompt.strip()) < 5:
+    content_type = request.headers.get("content-type", "")
+    payload = None
+    if content_type.startswith("application/json"):
+        data = await request.json()
+        payload = GenerateRequest(**data)
+        prompt = payload.prompt
+        hero_url = payload.hero_url
+        hero_path = payload.hero_path
+
+    if not prompt or len(prompt.strip()) < 5:
         raise HTTPException(status_code=400, detail="Prompt is too short")
 
-    hotel_name, location = extract_hotel_info(payload.prompt)
-    text = generate_text(payload.prompt, hotel_name, location)
+    hotel_name, location = extract_hotel_info(prompt)
+    text = generate_text(prompt, hotel_name, location)
 
     run_id = f"{_timestamp()}_{_slugify(hotel_name)}"
     run_dir = BASE_OUTPUT / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    hero_url = _prepare_hero(payload.prompt, hotel_name, location, payload.hero_url, payload.hero_path, run_dir)
-    if hero_url:
-        logging.info("Hero image resolved: %s", hero_url)
+    user_hero_path = run_dir / "hero_user.png"
+    resolved_hero_url = ""
+    hero_source = "ai"
+
+    if hero_file:
+        if not hero_file.content_type or not hero_file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Invalid hero file type")
+        user_hero_path.write_bytes(await hero_file.read())
+        resolved_hero_url = user_hero_path.resolve().as_uri()
+        hero_source = "user"
+    elif hero_url:
+        _download_image(hero_url, user_hero_path)
+        resolved_hero_url = user_hero_path.resolve().as_uri()
+        hero_source = "user"
+    elif hero_path:
+        src = Path(hero_path).expanduser().resolve()
+        if src.exists():
+            shutil.copy2(src, user_hero_path)
+            resolved_hero_url = user_hero_path.resolve().as_uri()
+            hero_source = "user"
+
+    if not resolved_hero_url:
+        resolved_hero_url = _prepare_hero(prompt, hotel_name, location, None, None, run_dir)
+
+    if resolved_hero_url:
+        logging.info("Hero image resolved: %s", resolved_hero_url)
     else:
         logging.info("Hero image missing; using layout without image.")
 
-    hero_source = "user" if payload.hero_url or payload.hero_path else "ai"
-    schema = build_schema(payload.prompt, hotel_name, location, hero_url, text, hero_source)
+    schema = build_schema(prompt, hotel_name, location, resolved_hero_url, text, hero_source)
     render_data = schema_to_render_data(schema)
 
-    (run_dir / "prompt.txt").write_text(payload.prompt, encoding="utf-8")
+    (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     (run_dir / "data.json").write_text(json.dumps(render_data, indent=2), encoding="utf-8")
     (run_dir / "schema.json").write_text(json.dumps(schema, indent=2), encoding="utf-8")
 
@@ -704,7 +769,7 @@ async def generate_brochure(
 
     brochure = Brochure(
         user_id=user.id,
-        prompt=payload.prompt,
+        prompt=prompt,
         hotel_name=hotel_name,
         location=location,
         headline=text["headline"],
@@ -793,6 +858,180 @@ async def edit_brochure(
         "schema": merged,
         "png_url": png_url,
         "pdf_url": pdf_url,
+    }
+
+
+@app.post("/brochures/{brochure_id}/assets/hero")
+async def upload_hero(
+    brochure_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
+    brochure = (
+        db.query(Brochure)
+        .filter(Brochure.id == brochure_id, Brochure.user_id == user.id)
+        .first()
+    )
+    if not brochure:
+        raise HTTPException(status_code=404, detail="Brochure not found")
+
+    schema = json.loads(brochure.schema_json) if brochure.schema_json else _schema_from_record(brochure)
+
+    run_dir = _brochure_run_dir(brochure.id)
+    hero_path = run_dir / "hero_user.png"
+    hero_path.write_bytes(await file.read())
+
+    schema.setdefault("assets", {}).setdefault("hero_image", {})
+    schema["assets"]["hero_image"]["source"] = "user"
+    schema["assets"]["hero_image"]["url"] = hero_path.resolve().as_uri()
+
+    render_data = schema_to_render_data(schema)
+    html = render_brochure_html(render_data)
+    export_paths = await export_assets_async(html, run_dir, "brochure")
+
+    brochure.schema_json = json.dumps(schema)
+    brochure.png_path = Path(export_paths["png_path"]).resolve().relative_to(Path("output").resolve()).as_posix()
+    brochure.pdf_path = Path(export_paths["pdf_path"]).resolve().relative_to(Path("output").resolve()).as_posix()
+    db.add(brochure)
+    db.commit()
+    db.refresh(brochure)
+
+    _update_schema_files(run_dir, schema, render_data)
+
+    return {
+        "schema": schema,
+        "png_url": f"/files/{brochure.png_path}".replace("\\", "/"),
+        "pdf_url": f"/files/{brochure.pdf_path}".replace("\\", "/"),
+    }
+
+
+@app.post("/brochures/{brochure_id}/assets/gallery")
+async def upload_gallery(
+    brochure_id: int,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+    if len(files) > 5:
+        raise HTTPException(status_code=400, detail="Max 5 images allowed")
+
+    brochure = (
+        db.query(Brochure)
+        .filter(Brochure.id == brochure_id, Brochure.user_id == user.id)
+        .first()
+    )
+    if not brochure:
+        raise HTTPException(status_code=404, detail="Brochure not found")
+
+    for f in files:
+        if not f.content_type or not f.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Invalid file type")
+
+    schema = json.loads(brochure.schema_json) if brochure.schema_json else _schema_from_record(brochure)
+
+    run_dir = _brochure_run_dir(brochure.id)
+    gallery_items = []
+    for idx, f in enumerate(files, start=1):
+        gallery_path = run_dir / f"gallery_{idx}.png"
+        gallery_path.write_bytes(await f.read())
+        gallery_items.append(
+            {"source": "user", "url": gallery_path.resolve().as_uri(), "alt": ""}
+        )
+
+    schema.setdefault("assets", {}).setdefault("gallery", [])
+    schema["assets"]["gallery"] = schema["assets"]["gallery"] + gallery_items
+
+    render_data = schema_to_render_data(schema)
+    html = render_brochure_html(render_data)
+    export_paths = await export_assets_async(html, run_dir, "brochure")
+
+    brochure.schema_json = json.dumps(schema)
+    brochure.png_path = Path(export_paths["png_path"]).resolve().relative_to(Path("output").resolve()).as_posix()
+    brochure.pdf_path = Path(export_paths["pdf_path"]).resolve().relative_to(Path("output").resolve()).as_posix()
+    db.add(brochure)
+    db.commit()
+    db.refresh(brochure)
+
+    _update_schema_files(run_dir, schema, render_data)
+
+    return {
+        "schema": schema,
+        "png_url": f"/files/{brochure.png_path}".replace("\\", "/"),
+        "pdf_url": f"/files/{brochure.pdf_path}".replace("\\", "/"),
+    }
+
+
+@app.post("/brochures/{brochure_id}/contact")
+async def update_contact(
+    brochure_id: int,
+    payload: ContactRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    brochure = (
+        db.query(Brochure)
+        .filter(Brochure.id == brochure_id, Brochure.user_id == user.id)
+        .first()
+    )
+    if not brochure:
+        raise HTTPException(status_code=404, detail="Brochure not found")
+
+    schema = json.loads(brochure.schema_json) if brochure.schema_json else _schema_from_record(brochure)
+    sections = schema.setdefault("sections", {})
+    contact = sections.setdefault(
+        "contact",
+        {
+            "email": None,
+            "phone": None,
+            "website": None,
+            "address": None,
+            "qr_code_url": None,
+        },
+    )
+
+    if payload.email is not None:
+        contact["email"] = payload.email.strip() or None
+    if payload.phone is not None:
+        contact["phone"] = payload.phone.strip() or None
+    if payload.website is not None:
+        contact["website"] = payload.website.strip() or None
+    if payload.address is not None:
+        contact["address"] = payload.address.strip() or None
+
+    run_dir = (Path("output") / brochure.png_path).resolve().parent
+    if not run_dir.exists():
+        run_dir = _brochure_run_dir(brochure.id)
+
+    if contact.get("website"):
+        qr_path = run_dir / "qr.png"
+        contact["qr_code_url"] = _write_qr_code(contact["website"], qr_path)
+    else:
+        contact["qr_code_url"] = None
+
+    render_data = schema_to_render_data(schema)
+    html = render_brochure_html(render_data)
+    export_paths = await export_assets_async(html, run_dir, "brochure")
+
+    brochure.schema_json = json.dumps(schema)
+    output_root = Path("output").resolve()
+    brochure.png_path = Path(export_paths["png_path"]).resolve().relative_to(output_root).as_posix()
+    brochure.pdf_path = Path(export_paths["pdf_path"]).resolve().relative_to(output_root).as_posix()
+    db.add(brochure)
+    db.commit()
+    db.refresh(brochure)
+
+    _update_schema_files(run_dir, schema, render_data)
+
+    return {
+        "schema": schema,
+        "png_url": f"/files/{brochure.png_path}".replace("\\", "/"),
+        "pdf_url": f"/files/{brochure.pdf_path}".replace("\\", "/"),
     }
 
 
