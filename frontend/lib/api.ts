@@ -96,16 +96,17 @@ export async function apiLogin(email: string, password: string) {
   return data.access_token as string;
 }
 
-export async function apiGenerate(prompt: string) {
+export async function apiGenerate(prompt: string, preset: string) {
   return request("/brochures/generate", {
     method: "POST",
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ prompt, preset }),
   });
 }
 
-export async function apiGenerateWithHero(prompt: string, heroFile: File) {
+export async function apiGenerateWithHero(prompt: string, heroFile: File, preset: string) {
   const form = new FormData();
   form.append("prompt", prompt);
+  form.append("preset", preset);
   form.append("hero_file", heroFile);
   return requestForm("/brochures/generate", form);
 }

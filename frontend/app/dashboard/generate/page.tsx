@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { motion as fmMotion } from "framer-motion";
 import { apiEdit, apiGenerate, apiGenerateWithHero, apiUploadGallery, apiUpdateContact } from "../../../lib/api";
 
 const pageMotion = {
@@ -18,6 +18,12 @@ const defaultPrompts = [
 ];
 
 const presetsKey = "brochure_presets";
+const stylePresets = ["editorial_luxury", "modern_minimal", "vibrant_resort", "wellness_calm"] as const;
+const motion: any = fmMotion;
+
+function formatPresetLabel(preset: string) {
+  return preset.replace(/_/g, " ");
+}
 
 export default function GeneratePage() {
   const router = useRouter();
@@ -40,6 +46,8 @@ export default function GeneratePage() {
   const [contactAddress, setContactAddress] = useState("");
   const [contactLoading, setContactLoading] = useState(false);
   const [contactError, setContactError] = useState("");
+  const [selectedPreset, setSelectedPreset] = useState<string>("editorial_luxury");
+  const [presetLoading, setPresetLoading] = useState(false);
 
   const qrPreviewUrl = (() => {
     const raw = result?.schema?.sections?.contact?.qr_code_url;
@@ -71,6 +79,13 @@ export default function GeneratePage() {
     }
   }, [router]);
 
+  useEffect(() => {
+    const presetFromSchema = result?.schema?.preset;
+    if (typeof presetFromSchema === "string" && presetFromSchema.length > 0) {
+      setSelectedPreset(presetFromSchema);
+    }
+  }, [result?.schema?.preset]);
+
   const isPromptValid = prompt.trim().length >= 12;
 
   async function handleGenerate(e: React.FormEvent) {
@@ -83,9 +98,10 @@ export default function GeneratePage() {
     setLoading(true);
     try {
       const res = heroFile
-        ? await apiGenerateWithHero(prompt.trim(), heroFile)
-        : await apiGenerate(prompt.trim());
+        ? await apiGenerateWithHero(prompt.trim(), heroFile, selectedPreset)
+        : await apiGenerate(prompt.trim(), selectedPreset);
       setResult(res);
+      setSelectedPreset(res?.schema?.preset || selectedPreset);
       setPreviewStamp(Date.now());
     } catch (err: any) {
       const msg = err.message || "Generation failed";
@@ -105,9 +121,10 @@ export default function GeneratePage() {
     setLoading(true);
     try {
       const res = heroFile
-        ? await apiGenerateWithHero(prompt.trim(), heroFile)
-        : await apiGenerate(prompt.trim());
+        ? await apiGenerateWithHero(prompt.trim(), heroFile, selectedPreset)
+        : await apiGenerate(prompt.trim(), selectedPreset);
       setResult(res);
+      setSelectedPreset(res?.schema?.preset || selectedPreset);
       setPreviewStamp(Date.now());
     } catch (err: any) {
       const msg = err.message || "Generation failed";
@@ -151,6 +168,9 @@ export default function GeneratePage() {
         png_url: res.png_url,
         pdf_url: res.pdf_url,
       }));
+      if (res?.schema?.preset) {
+        setSelectedPreset(res.schema.preset);
+      }
       setPreviewStamp(Date.now());
       setRefineInput("");
     } catch (err: any) {
@@ -162,6 +182,38 @@ export default function GeneratePage() {
       setRefineError(msg);
     } finally {
       setRefineLoading(false);
+    }
+  }
+
+  async function handlePresetChange(nextPreset: string) {
+    setSelectedPreset(nextPreset);
+    if (!result?.id) return;
+    if (result?.schema?.preset === nextPreset) return;
+    setPresetLoading(true);
+    setRefineError("");
+    try {
+      const res = await apiEdit(result.id, `Set preset to ${nextPreset}.`);
+      if (res?.error) {
+        setRefineError(res.message || "Preset update failed.");
+        return;
+      }
+      setResult((prev: any) => ({
+        ...prev,
+        schema: res.schema,
+        png_url: res.png_url,
+        pdf_url: res.pdf_url,
+      }));
+      setSelectedPreset(res?.schema?.preset || nextPreset);
+      setPreviewStamp(Date.now());
+    } catch (err: any) {
+      const msg = err.message || "Preset update failed";
+      if (msg.toLowerCase().includes("session expired")) {
+        router.replace("/login");
+        return;
+      }
+      setRefineError(msg);
+    } finally {
+      setPresetLoading(false);
     }
   }
 
@@ -228,7 +280,7 @@ export default function GeneratePage() {
   }
 
   return (
-    <motion.main
+    <motion.div
       className="min-h-screen bg-[#0b0d12] text-white"
       initial="initial"
       animate="animate"
@@ -299,7 +351,7 @@ export default function GeneratePage() {
                     onClick={() => setPrompt(item)}
                     className="rounded-full border border-white/15 px-4 py-2 text-xs text-white/70 transition hover:border-white/40"
                   >
-                    Use preset
+                    Use prompt
                   </button>
                 ))}
                 <button
@@ -309,6 +361,24 @@ export default function GeneratePage() {
                 >
                   Save prompt
                 </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                {stylePresets.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => handlePresetChange(preset)}
+                    className={`rounded-full border px-4 py-2 text-xs transition ${
+                      selectedPreset === preset
+                        ? "border-white/50 bg-white/10 text-white"
+                        : "border-white/15 text-white/70 hover:border-white/40"
+                    }`}
+                    disabled={presetLoading}
+                  >
+                    {formatPresetLabel(preset)}
+                  </button>
+                ))}
               </div>
 
               {!isPromptValid && prompt.length > 0 && (
@@ -501,17 +571,17 @@ export default function GeneratePage() {
                 <motion.button
                   className="w-full rounded-2xl border border-white/25 px-5 py-3 text-xs uppercase tracking-[0.3em] text-white/80 transition hover:border-white/50 disabled:cursor-not-allowed disabled:opacity-60"
                   type="submit"
-                  disabled={refineLoading}
-                  whileHover={{ scale: refineLoading ? 1 : 1.02 }}
-                  whileTap={{ scale: refineLoading ? 1 : 0.98 }}
+                  disabled={refineLoading || presetLoading}
+                  whileHover={{ scale: refineLoading || presetLoading ? 1 : 1.02 }}
+                  whileTap={{ scale: refineLoading || presetLoading ? 1 : 0.98 }}
                 >
-                  {refineLoading ? "Refining..." : "Apply refinement"}
+                  {refineLoading ? "Refining..." : presetLoading ? "Updating preset..." : "Apply refinement"}
                 </motion.button>
               </form>
             )}
           </motion.div>
         </section>
       </div>
-    </motion.main>
+    </motion.div>
   );
 }

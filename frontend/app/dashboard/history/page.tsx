@@ -3,13 +3,19 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { motion as fmMotion } from "framer-motion";
 import { apiHistory } from "../../../lib/api";
+const motion: any = fmMotion;
 
 const pageMotion = {
   initial: { opacity: 0, y: 10 },
   animate: { opacity: 1, y: 0, transition: { duration: 0.45, ease: "easeOut" } },
 };
+
+function formatPresetLabel(preset?: string) {
+  if (!preset) return "editorial luxury";
+  return preset.replace(/_/g, " ");
+}
 
 export default function HistoryPage() {
   const router = useRouter();
@@ -106,6 +112,9 @@ export default function HistoryPage() {
                     alt="Brochure"
                   />
                 </div>
+                <p className="mt-3 text-xs uppercase tracking-[0.25em] text-white/55">
+                  Preset: {formatPresetLabel(item.preset)}
+                </p>
                 <p className="mt-4 text-sm text-white/70 line-clamp-3">{item.prompt}</p>
                 <div className="mt-4 flex flex-wrap gap-3">
                   <a

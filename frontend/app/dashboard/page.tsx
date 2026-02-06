@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { motion as fmMotion } from "framer-motion";
+const motion: any = fmMotion;
 
 const pageMotion = {
   initial: { opacity: 0, y: 10 },

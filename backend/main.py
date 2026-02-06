@@ -1,3 +1,9 @@
+"""Main API service for brochure generation, refinement, and asset management.
+
+This module intentionally keeps brochure state in `schema_json` and always renders
+exports from schema-derived data to keep behavior deterministic.
+"""
+
 from datetime import datetime
 import asyncio
 import sys
@@ -51,6 +57,7 @@ Base.metadata.create_all(bind=engine)
 
 
 def _ensure_schema_column() -> None:
+    """Add `schema_json` column for older local databases if missing."""
     with engine.connect() as conn:
         rows = conn.execute(sql_text("PRAGMA table_info(brochures)")).fetchall()
         cols = [row[1] for row in rows]
@@ -83,6 +90,7 @@ class GenerateRequest(BaseModel):
     prompt: str
     hero_url: Optional[str] = None
     hero_path: Optional[str] = None
+    preset: Optional[str] = None
 
 
 class BrochureResponse(BaseModel):
@@ -93,6 +101,7 @@ class BrochureResponse(BaseModel):
     headline: str
     description: str
     amenities: list[str]
+    preset: Optional[str] = None
     schema: Optional[dict] = None
     png_url: str
     pdf_url: str
@@ -136,6 +145,58 @@ TEMPLATES = [
     },
 ]
 
+PRESET_DEFAULT = "editorial_luxury"
+PRESET_CONFIG = {
+    "editorial_luxury": {
+        "tone": "editorial luxury",
+        "copy_modifier": (
+            "poetic, refined, expressive luxury travel prose; elevated cadence; vivid but restrained imagery"
+        ),
+        "image_prompt_modifier": (
+            "low saturation, cinematic lighting, soft contrast, moody shadows, golden hour, "
+            "dark overlay readability"
+        ),
+        "mood": "moody_refined",
+        "time_of_day": "golden hour",
+    },
+    "modern_minimal": {
+        "tone": "modern minimal",
+        "copy_modifier": (
+            "concise, restrained, modern copy; short clean sentences; remove ornament and excess adjectives"
+        ),
+        "image_prompt_modifier": (
+            "neutral colors, bright daylight, clean lines, high clarity, minimal shadows, "
+            "medium overlay readability"
+        ),
+        "mood": "clean_minimal",
+        "time_of_day": "daylight",
+    },
+    "vibrant_resort": {
+        "tone": "vibrant resort",
+        "copy_modifier": (
+            "upbeat, inviting, energetic resort voice; bright verbs and warm momentum; still premium"
+        ),
+        "image_prompt_modifier": (
+            "high saturation, strong daylight, vivid sky, tropical colors, energetic composition, "
+            "light overlay readability"
+        ),
+        "mood": "energetic_tropical",
+        "time_of_day": "midday",
+    },
+    "wellness_calm": {
+        "tone": "wellness calm",
+        "copy_modifier": (
+            "gentle, slow, soothing language; airy pacing; restorative calm with quiet confidence"
+        ),
+        "image_prompt_modifier": (
+            "sunrise light, airy exposure, soft pastels, low contrast, bright whites, "
+            "lightest overlay readability"
+        ),
+        "mood": "airy_serene",
+        "time_of_day": "sunrise",
+    },
+}
+
 VERB_BLACKLIST = {"design", "create", "generate", "make", "build", "craft", "produce"}
 
 SCHEMA_PATCH_SYSTEM_PROMPT = (
@@ -143,7 +204,8 @@ SCHEMA_PATCH_SYSTEM_PROMPT = (
     "STRICT RULES:\n"
     "- Output ONLY valid JSON. No markdown, no commentary.\n"
     "- Only include keys that must change. Do not return the full schema.\n"
-    "- Allowed top-level keys: \"meta\", \"assets\", \"sections\".\n"
+    "- Allowed top-level keys: \"preset\", \"meta\", \"assets\", \"sections\".\n"
+    "- Allowed preset values: editorial_luxury, modern_minimal, vibrant_resort, wellness_calm.\n"
     "- Allowed section keys: hero, about, amenities, gallery.\n"
     "- Each section supports: \"visibility\": true | false.\n"
     "- Contact fields are READ-ONLY. Never add or modify: sections.contact.*\n"
@@ -178,6 +240,30 @@ def _slugify(text: str) -> str:
 
 def _timestamp() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+
+def _normalize_preset(value: Optional[str]) -> str:
+    """Normalize incoming preset to a supported key with safe default."""
+    preset = (value or PRESET_DEFAULT).strip().lower()
+    return preset if preset in PRESET_CONFIG else PRESET_DEFAULT
+
+
+def _apply_preset_fields(schema: dict, preset: str) -> None:
+    """Apply preset-derived tone and hero prompt fields onto schema in-place."""
+    cfg = PRESET_CONFIG.get(_normalize_preset(preset), PRESET_CONFIG[PRESET_DEFAULT])
+    schema["preset"] = _normalize_preset(preset)
+    schema.setdefault("meta", {})
+    schema["meta"]["tone"] = cfg["tone"]
+    schema.setdefault("assets", {}).setdefault("hero_image", {})
+    schema["assets"]["hero_image"]["prompt_modifier"] = cfg["image_prompt_modifier"]
+    schema["assets"]["hero_image"]["mood"] = cfg["mood"]
+    schema["assets"]["hero_image"]["time_of_day"] = cfg["time_of_day"]
+
+
+def _preset_image_prompt(base_prompt: str, preset: str) -> str:
+    """Append preset image styling to user prompt for image generation calls."""
+    cfg = PRESET_CONFIG.get(_normalize_preset(preset), PRESET_CONFIG[PRESET_DEFAULT])
+    return f"{base_prompt}\n\nImage style modifier: {cfg['image_prompt_modifier']}"
 
 
 def _extract_location(text: str) -> str | None:
@@ -261,8 +347,81 @@ def extract_hotel_info(prompt: str) -> tuple[str, str]:
     return name, location
 
 
-def generate_text(prompt: str, hotel_name: str, location: str) -> dict:
-    ai_text = generate_copy(prompt, hotel_name, location)
+def _parse_marked_amenities(text: str) -> list[str]:
+    items: list[str] = []
+    lines = (text or "").replace("\r", "\n").split("\n")
+    for line in lines:
+        candidate = line.strip()
+        if not candidate:
+            continue
+        candidate = re.sub(r"^(?:[-*\u2022]+|\d+[.)])\s*", "", candidate).strip()
+        if not candidate:
+            continue
+        parts = [p.strip() for p in candidate.split(",") if p.strip()]
+        if parts:
+            items.extend(parts)
+        else:
+            items.append(candidate)
+    return [" ".join(item.split()) for item in items if item]
+
+
+def _extract_user_copy(prompt: str) -> Optional[dict[str, Any]]:
+    """Parse explicit `Headline/Description/Amenities` blocks from prompt.
+
+    Returns validated user content only if all required fields are present and
+    pass constraints. Returns None to trigger normal AI fallback path.
+    """
+    marker_re = re.compile(r"(?i)\b(headline|description|amenities)\s*:\s*")
+    matches = list(marker_re.finditer(prompt))
+    if not matches:
+        return None
+
+    sections: dict[str, str] = {}
+    for i, match in enumerate(matches):
+        key = match.group(1).lower()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(prompt)
+        sections[key] = prompt[start:end].strip()
+
+    required = {"headline", "description", "amenities"}
+    if not required.issubset(sections.keys()):
+        return None
+
+    headline = " ".join(sections["headline"].split())
+    description = " ".join(sections["description"].split())
+    amenities = _parse_marked_amenities(sections["amenities"])
+
+    if not headline or len(headline) > 80:
+        return None
+    if not description or len(description) > 320:
+        return None
+    if len(amenities) < 4 or len(amenities) > 6:
+        return None
+    if any(len(item.split()) > 6 for item in amenities):
+        return None
+
+    return {
+        "headline": headline,
+        "description": description,
+        "amenities": amenities,
+    }
+
+
+def generate_text(prompt: str, hotel_name: str, location: str, preset: str) -> dict:
+    """Generate brochure copy with deterministic precedence.
+
+    1) Use validated user-provided marker content if present.
+    2) Otherwise call AI text service.
+    3) If AI fails, return template fallback.
+    """
+    user_copy = _extract_user_copy(prompt)
+    if user_copy:
+        logging.info("Using user-provided brochure content")
+        return user_copy
+
+    cfg = PRESET_CONFIG.get(_normalize_preset(preset), PRESET_CONFIG[PRESET_DEFAULT])
+    prompt_with_modifier = f"{prompt}\n\nCopy style modifier: {cfg['copy_modifier']}"
+    ai_text = generate_copy(prompt_with_modifier, hotel_name, location)
     if ai_text:
         return ai_text
     tpl = random.choice(TEMPLATES)
@@ -306,15 +465,16 @@ def build_schema(
     hero_url: str,
     text: dict,
     hero_source: str,
+    preset: str,
 ) -> dict:
-    return {
+    schema = {
         "brochure_id": "",
         "version": 2,
-        "preset": "editorial_luxury",
+        "preset": _normalize_preset(preset),
         "meta": {
             "hotel_name": hotel_name,
             "location": location,
-            "tone": "editorial luxury",
+            "tone": PRESET_CONFIG[_normalize_preset(preset)]["tone"],
             "language": "en",
         },
         "assets": {
@@ -322,9 +482,9 @@ def build_schema(
                 "source": hero_source,
                 "url": hero_url,
                 "alt": f"{hotel_name} in {location}",
-                "prompt_modifier": "",
-                "mood": "",
-                "time_of_day": "",
+                "prompt_modifier": PRESET_CONFIG[_normalize_preset(preset)]["image_prompt_modifier"],
+                "mood": PRESET_CONFIG[_normalize_preset(preset)]["mood"],
+                "time_of_day": PRESET_CONFIG[_normalize_preset(preset)]["time_of_day"],
             },
             "gallery": [],
         },
@@ -359,9 +519,12 @@ def build_schema(
             },
         },
     }
+    _apply_preset_fields(schema, preset)
+    return schema
 
 
 def schema_to_render_data(schema: dict) -> dict:
+    """Project schema into the minimal template render payload."""
     meta = schema.get("meta", {})
     sections = schema.get("sections", {})
     assets = schema.get("assets", {})
@@ -402,10 +565,12 @@ def _schema_from_record(brochure: Brochure) -> dict:
         hero_url,
         text,
         "ai",
+        PRESET_DEFAULT,
     )
 
 
 def apply_schema_patch(schema: dict, patch: dict) -> dict:
+    """Validate and apply edit patches while enforcing schema guardrails."""
     if not isinstance(patch, dict):
         return {"error": "needs_clarification", "message": "Invalid patch format."}
     if patch.get("error"):
@@ -455,7 +620,7 @@ def apply_schema_patch(schema: dict, patch: dict) -> dict:
         if section_name in {"hero", "about", "amenities", "gallery"} and isinstance(visibility, bool):
             patch = {"sections": {section_name: {"visibility": visibility}}}
 
-    allowed_top = {"meta", "assets", "sections"}
+    allowed_top = {"preset", "meta", "assets", "sections"}
     # If the model returned only unknown keys but one of them contains a valid patch, unwrap it.
     if not any(k in allowed_top for k in patch.keys()):
         for value in patch.values():
@@ -474,6 +639,15 @@ def apply_schema_patch(schema: dict, patch: dict) -> dict:
         patch = {k: v for k, v in patch.items() if k in allowed_top}
 
     logging.info("Patch after normalization keys: %s", list(patch.keys()))
+
+    if "preset" in patch:
+        requested = str(patch.get("preset") or "").strip().lower()
+        if requested not in PRESET_CONFIG:
+            allowed = ", ".join(PRESET_CONFIG.keys())
+            return {
+                "error": "needs_clarification",
+                "message": f"Invalid preset. Allowed: {allowed}.",
+            }
 
     if "sections" in patch and "contact" in (patch.get("sections") or {}):
         return {"error": "needs_clarification", "message": "Contact fields are read-only."}
@@ -520,6 +694,9 @@ def apply_schema_patch(schema: dict, patch: dict) -> dict:
 
     merged = _deep_merge(merged, patch)
 
+    if patch.get("preset"):
+        _apply_preset_fields(merged, str(patch["preset"]))
+
     hero = merged.get("sections", {}).get("hero", {})
     if "headline" in hero:
         hero["headline"] = _clamp_text(str(hero["headline"]), 80)
@@ -547,6 +724,7 @@ def apply_schema_patch(schema: dict, patch: dict) -> dict:
 
 
 def generate_schema_patch(schema: dict, instruction: str) -> dict:
+    """Request an edit patch from LLM and normalize the returned JSON."""
     token = os.getenv("HF_API_TOKEN")
     model = os.getenv("HF_T5_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
     if not token:
@@ -705,10 +883,12 @@ async def generate_brochure(
     prompt: Optional[str] = Form(None),
     hero_url: Optional[str] = Form(None),
     hero_path: Optional[str] = Form(None),
+    preset: Optional[str] = Form(None),
     hero_file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Create brochure from prompt, persist schema, then export PNG/PDF."""
     content_type = request.headers.get("content-type", "")
     payload = None
     if content_type.startswith("application/json"):
@@ -717,12 +897,14 @@ async def generate_brochure(
         prompt = payload.prompt
         hero_url = payload.hero_url
         hero_path = payload.hero_path
+        preset = payload.preset
 
     if not prompt or len(prompt.strip()) < 5:
         raise HTTPException(status_code=400, detail="Prompt is too short")
+    preset = _normalize_preset(preset)
 
     hotel_name, location = extract_hotel_info(prompt)
-    text = generate_text(prompt, hotel_name, location)
+    text = generate_text(prompt, hotel_name, location, preset)
 
     run_id = f"{_timestamp()}_{_slugify(hotel_name)}"
     run_dir = BASE_OUTPUT / run_id
@@ -750,14 +932,15 @@ async def generate_brochure(
             hero_source = "user"
 
     if not resolved_hero_url:
-        resolved_hero_url = _prepare_hero(prompt, hotel_name, location, None, None, run_dir)
+        prompt_for_image = _preset_image_prompt(prompt, preset)
+        resolved_hero_url = _prepare_hero(prompt_for_image, hotel_name, location, None, None, run_dir)
 
     if resolved_hero_url:
         logging.info("Hero image resolved: %s", resolved_hero_url)
     else:
         logging.info("Hero image missing; using layout without image.")
 
-    schema = build_schema(prompt, hotel_name, location, resolved_hero_url, text, hero_source)
+    schema = build_schema(prompt, hotel_name, location, resolved_hero_url, text, hero_source, preset)
     render_data = schema_to_render_data(schema)
 
     (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -793,6 +976,7 @@ async def generate_brochure(
         headline=brochure.headline,
         description=brochure.description,
         amenities=text["amenities"],
+        preset=schema.get("preset"),
         schema=schema,
         png_url=png_url,
         pdf_url=pdf_url,
@@ -807,6 +991,7 @@ async def edit_brochure(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Apply conversational edit patch, update schema, and re-render exports."""
     if not payload.instruction or len(payload.instruction.strip()) < 3:
         return {"error": "needs_clarification", "message": "Instruction is too short."}
 
@@ -835,10 +1020,26 @@ async def edit_brochure(
     if isinstance(merged, dict) and merged.get("error"):
         return merged
 
+    previous_preset = _normalize_preset((current_schema or {}).get("preset"))
+    next_preset = _normalize_preset(merged.get("preset"))
+    run_dir = (Path("output") / brochure.png_path).resolve().parent
+    hero_asset = merged.setdefault("assets", {}).setdefault("hero_image", {})
+    hero_source = str(hero_asset.get("source") or "ai").lower()
+    if next_preset != previous_preset and hero_source != "user":
+        refreshed_hero_url = _prepare_hero(
+            _preset_image_prompt(brochure.prompt, next_preset),
+            brochure.hotel_name,
+            brochure.location,
+            None,
+            None,
+            run_dir,
+        )
+        if refreshed_hero_url:
+            hero_asset["source"] = "ai"
+            hero_asset["url"] = refreshed_hero_url
+
     render_data = schema_to_render_data(merged)
     html = render_brochure_html(render_data)
-
-    run_dir = (Path("output") / brochure.png_path).resolve().parent
     export_paths = await export_assets_async(html, run_dir, "brochure")
 
     brochure.schema_json = json.dumps(merged)
@@ -868,6 +1069,7 @@ async def upload_hero(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Replace brochure hero with a user image and re-render from schema."""
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid file type")
 
@@ -916,6 +1118,7 @@ async def upload_gallery(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Attach up to 5 gallery images to schema and re-render brochure."""
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
     if len(files) > 5:
@@ -974,6 +1177,7 @@ async def update_contact(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Persist contact fields and QR, then re-render brochure exports."""
     brochure = (
         db.query(Brochure)
         .filter(Brochure.id == brochure_id, Brochure.user_id == user.id)
@@ -1047,6 +1251,7 @@ def my_brochures(db: Session = Depends(get_db), user: User = Depends(get_current
     for b in items:
         png_url = f"/files/{b.png_path}".replace("\\", "/")
         pdf_url = f"/files/{b.pdf_path}".replace("\\", "/")
+        schema_obj = json.loads(b.schema_json) if b.schema_json else None
         results.append(
             BrochureResponse(
                 id=b.id,
@@ -1056,7 +1261,8 @@ def my_brochures(db: Session = Depends(get_db), user: User = Depends(get_current
                 headline=b.headline,
                 description=b.description,
                 amenities=json.loads(b.amenities),
-                schema=json.loads(b.schema_json) if b.schema_json else None,
+                preset=(schema_obj or {}).get("preset"),
+                schema=schema_obj,
                 png_url=png_url,
                 pdf_url=pdf_url,
                 created_at=b.created_at,

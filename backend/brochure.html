@@ -126,17 +126,26 @@
     }
 
     .amenities {
-      font-size: var(--fs-amenities);
-      color: rgba(255,255,255,0.68);
-      margin: 0;
-      line-height: 1.4;
+      margin: 2px 0 0;
+      padding: 0;
+      list-style: none;
       max-width: 520px;
-      white-space: normal;
-      letter-spacing: 0.02em;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
+      max-height: 92px;
       overflow: hidden;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      column-gap: 22px;
+      row-gap: 8px;
+    }
+
+    .amenity-item {
+      font-size: 17px;
+      line-height: 1.3;
+      color: rgba(255,255,255,0.70);
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .qr-code {
@@ -167,7 +176,12 @@
       </h1>
       <h2 class="headline">{{headline}}</h2>
       <p class="desc">{{description}}</p>
-      <p class="amenities">{{amenities}}</p>
+      {% set amenity_items = amenities.split(' - ') if amenities else [] %}
+      <ul class="amenities" aria-label="Amenities">
+        {% for item in amenity_items[:6] %}
+        <li class="amenity-item">{{item}}</li>
+        {% endfor %}
+      </ul>
     </div>
 
     {% if qr_code_url %}
